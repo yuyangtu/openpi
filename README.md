@@ -15,7 +15,8 @@ used for the `pick_and_feed_headmove220` dataset.
 When cloning, make sure to update submodules:
 
 ```bash
-git clone --recurse-submodules git@github.com:Physical-Intelligence/openpi.git
+git clone --recurse-submodules git@github.com:yuyangtu/openpi.git
+
 ```
 
 If you already cloned the repo:

@@ -1,3 +1,22 @@
+# ===== Model checkpoints =====
+checkpoints/
+*.ckpt
+*.pth
+*.pt
+*.bin
+
+# ===== Experiment logs =====
+wandb/
+logs/
+runs/
+outputs/
+
+# ===== Python cache =====
+__pycache__/
+*.pyc
+
+# ===== OS =====
+.DS_Store
 # Data directories.
 assets/
 checkpoints/

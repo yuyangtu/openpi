@@ -10,7 +10,7 @@ from openpi.models import model as _model
 def make_libero_example() -> dict:
     """Creates a random input example for the Libero policy."""
     return {
-        "observation/state": np.random.rand(8),
+        "observation/state": np.random.rand(16),
         "observation/image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "observation/wrist_image": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
         "prompt": "do something",
@@ -97,4 +97,4 @@ class LiberoOutputs(transforms.DataTransformFn):
         # dimension, we need to now parse out the correct number of actions in the return dict.
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        return {"actions": np.asarray(data["actions"][:, :8])}

@@ -1,135 +1,170 @@
-Fine-tuning PI0.5 (pi05) with OpenPI
+# Fine-tuning PI0.5 (pi05) with OpenPI
 
-This repository contains our fine-tuning pipeline for PI0.5 (pi05) based on
-the Physical-Intelligence OpenPI framework.
+This repository contains our fine-tuning pipeline for **PI0.5 (pi05)** based on
+the Physical-Intelligence **OpenPI** framework.
 
-We follow the original OpenPI workflow (dataset preparation -> PyTorch conversion ->
-normalization -> training -> inference) and adapt it for fine-tuning PI0.5 models
+We follow the original OpenPI workflow (dataset preparation → PyTorch conversion →
+normalization → training → inference) and adapt it for fine-tuning PI0.5 models
 on custom LeRobot-style datasets.
 
-This repository focuses on code and configuration. Model checkpoints are not included.
+This repository focuses on **code and configuration**. Model checkpoints are not
+included.
 
-Overview
+---
 
-Base framework: OpenPI
+## Overview
 
-Model: PI0.5 (pi05)
+- Base framework: OpenPI
+- Model: **PI0.5 (pi05)**
+- Training mode: fine-tuning
+- Dataset format: LeRobot-compatible dataset
+- Backend: PyTorch (Distributed Data Parallel)
 
-Training mode: fine-tuning
+---
 
-Dataset format: LeRobot-compatible dataset
+## Installation
 
-Backend: PyTorch (Distributed Data Parallel)
+We recommend using `uv`:
 
-Installation
-
-We recommend using uv:
-
+```bash
 git clone https://github.com/yuyangtu/openpi.git
-
 cd openpi
 uv sync
+```
 
 Alternatively:
 
+```bash
 pip install -e .
+```
 
-Dataset Preparation
-1. Prepare a LeRobot-style dataset
+---
+
+## Dataset Preparation
+
+### 1. Prepare a LeRobot-style dataset
 
 Assume your dataset directory is named:
 
+```text
 pick_and_feed_headmove220
+```
 
 The dataset must follow the standard LeRobot directory structure.
 
-2. Copy dataset to the LeRobot cache (machine-dependent)
+---
 
-This step depends on your machine setup and filesystem layout.
+### 2. Copy dataset to the LeRobot cache (machine-dependent)
+
+⚠️ This step depends on your machine setup and filesystem layout.
 
 Example (copying a dataset from one machine to another):
 
-(base) tu@tams98:~/.cache/huggingface/lerobot$
-scp -r pick_and_feed_headmove220/ tu@tamsgpu6:~/.cache/huggingface/lerobot
+```bash
+(base) tu@tams98:~/.cache/huggingface/lerobot$ \
+scp -r pick_and_feed_headmove220/ \
+tu@tamsgpu6:~/.cache/huggingface/lerobot
+```
 
 After copying, the dataset should be located at:
 
+```text
 ~/.cache/huggingface/lerobot/pick_and_feed_headmove220
+```
 
-Dataset Conversion to PyTorch
+---
 
-If your dataset is not yet in PyTorch-ready format, follow the original OpenPI
-dataset conversion steps.
+## Dataset Conversion to PyTorch
 
-This repository does not modify the OpenPI dataset conversion pipeline.
+If your dataset is not yet in PyTorch-ready format, follow the **original OpenPI
+dataset conversion steps**.
+
+This repository does **not modify** the OpenPI dataset conversion pipeline.
 Please refer to the upstream OpenPI documentation for details.
 
-Compute Normalization Statistics
+---
+
+## Compute Normalization Statistics
 
 Before training, compute normalization statistics for the dataset:
 
-uv run scripts/compute_norm_stats.py --config-name pi05_pick_and_feed_headmove220
+```bash
+uv run scripts/compute_norm_stats.py \
+  --config-name pi05_pick_and_feed_headmove220
+```
 
 This step computes observation and action normalization used during training
 and inference.
 
-Training (Fine-tuning PI0.5)
+---
+
+## Training (Fine-tuning PI0.5)
 
 We fine-tune PI0.5 using PyTorch Distributed Data Parallel (DDP).
 
 Example command using 2 GPUs:
 
-PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512
-CUDA_VISIBLE_DEVICES=0,1
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=2
-scripts/train_pytorch.py pi05_pick_and_feed_headmove220
---exp-name=pick_and_feed --overwrite
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512 \
+CUDA_VISIBLE_DEVICES=0,1 \
+uv run torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  scripts/train_pytorch.py \
+  pi05_pick_and_feed_headmove220 \
+  --exp-name=pick_and_feed \
+  --overwrite
+```
 
 Notes:
+- `pi05_pick_and_feed_headmove220` refers to the training configuration
+- `--exp-name` controls the experiment subdirectory
+- Checkpoints will be saved under the `checkpoints/` directory
 
-pi05_pick_and_feed_headmove220 refers to the training configuration
+---
 
---exp-name controls the experiment subdirectory
-
-Checkpoints will be saved under the checkpoints directory
-
-Inference / Serving a Trained Policy
+## Inference / Serving a Trained Policy
 
 After training, you can serve the trained policy from a checkpoint:
 
-(openpi) CUDA_VISIBLE_DEVICES=2
-uv run scripts/serve_policy.py policy:checkpoint
---policy.config=pi05_pick_and_feed_headmove220
---policy.dir=checkpoints/pi05_pick_and_feed_headmove220/pick_and_feed/12000
+```bash
+(openpi) CUDA_VISIBLE_DEVICES=2 \
+uv run scripts/serve_policy.py policy:checkpoint \
+  --policy.config=pi05_pick_and_feed_headmove220 \
+  --policy.dir=checkpoints/pi05_pick_and_feed_headmove220/pick_and_feed/12000
+```
 
 This launches a policy server using the specified checkpoint.
 
-Checkpoints
+---
 
-Model checkpoints are NOT included in this repository.
+## Checkpoints
 
-This repository focuses on code and configuration.
+⚠️ **Model checkpoints are NOT included in this repository.**
 
-Checkpoints must be generated by training the model using the commands above.
+- This repository focuses on code and configuration.
+- Checkpoints must be generated by training the model using the commands above.
 
 Expected directory structure:
 
+```text
 checkpoints/
-pi05_pick_and_feed_headmove220/
-pick_and_feed/
-12000/
+ └── pi05_pick_and_feed_headmove220/
+     └── pick_and_feed/
+         └── 12000/
+```
 
-Notes
+---
 
-This repository preserves the original OpenPI workflow.
+## Notes
 
-Only minimal modifications were made to support PI0.5 fine-tuning.
+- This repository preserves the original OpenPI workflow.
+- Only minimal modifications were made to support PI0.5 fine-tuning.
+- Dataset paths and copying steps may differ across machines and clusters.
 
-Dataset paths and copying steps may differ across machines and clusters.
+---
 
-License
+## License
 
-Please refer to the original OpenPI repository for license information.
-
-License
 Please refer to the original OpenPI repository for license information.

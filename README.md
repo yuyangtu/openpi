@@ -19,11 +19,6 @@ git clone --recurse-submodules git@github.com:yuyangtu/openpi.git
 
 ```
 
-If you already cloned the repo:
-
-```bash
-git submodule update --init --recursive
-```
 
 ### Python env with uv
 

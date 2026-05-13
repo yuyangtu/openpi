@@ -9,6 +9,8 @@ The design is intentionally client-side:
 3. Train a simplified external RL token from camera observations, robot state, and the VLA action chunk.
 4. Use that token with an actor-critic: actor predicts residual action edits; critic scores the VLA action plus residual.
 
+Run commands from the openpi repository root. Because this package lives under `utilities/`, set `PYTHONPATH=utilities`.
+
 ## Recommended flow
 
 ### Round 0: label RLT intervention timing
@@ -16,7 +18,7 @@ The design is intentionally client-side:
 Run without a checkpoint. Press `r` when you think RLT should intervene; press `r` again when raw VLA can continue alone.
 
 ```bash
-python utilities/rlt_training/collect_rlt_toggle_v3.py \
+PYTHONPATH=utilities python utilities/rlt_training/collect_rlt_toggle_v3.py \
   --host 134.100.39.19 \
   --port 8000 \
   --replay-dir ./rlt_replay_toggle_round0
@@ -25,7 +27,7 @@ python utilities/rlt_training/collect_rlt_toggle_v3.py \
 ### Round 1: small residual exploration
 
 ```bash
-python utilities/rlt_training/collect_rlt_toggle_v3.py \
+PYTHONPATH=utilities python utilities/rlt_training/collect_rlt_toggle_v3.py \
   --host 134.100.39.19 \
   --port 8000 \
   --replay-dir ./rlt_replay_toggle_round1 \
@@ -36,7 +38,7 @@ python utilities/rlt_training/collect_rlt_toggle_v3.py \
 ### Train actor-critic
 
 ```bash
-python utilities/rlt_training/train_rlt_actor_critic.py \
+PYTHONPATH=utilities python utilities/rlt_training/train_rlt_actor_critic.py \
   --replay-dir ./rlt_replay_toggle_round1 \
   --output-dir ./rlt_checkpoints_toggle \
   --epochs 30 \
@@ -46,7 +48,7 @@ python utilities/rlt_training/train_rlt_actor_critic.py \
 ### Round 2+: deploy trained RLT when toggled on
 
 ```bash
-python utilities/rlt_training/collect_rlt_toggle_v3.py \
+PYTHONPATH=utilities python utilities/rlt_training/collect_rlt_toggle_v3.py \
   --host 134.100.39.19 \
   --port 8000 \
   --replay-dir ./rlt_replay_toggle_round2 \

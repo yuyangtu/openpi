@@ -34,7 +34,8 @@ class RLTValueReplayDataset(Dataset):
                 delta_actions, _ = _pad_or_trim(item["delta_actions"], self.spec.horizon, self.spec.action_dim)
             else:
                 delta_actions = executed_actions - pi_actions
-            reward = np.float32(item["reward"])
+            reward_key = "discounted_return" if "discounted_return" in item else "reward"
+            reward = np.float32(item[reward_key])
             success = np.float32(item["success"])
             failure = np.float32(item["failure"])
             collision = np.float32(item["collision"])

@@ -18,6 +18,12 @@ OUTCOME_REWARD = {
     "neutral": 0.0,
 }
 
+GRIPPER_OVERRIDE_TO_ID = {
+    "none": 0,
+    "close": 1,
+    "open": 2,
+}
+
 
 @dataclasses.dataclass
 class EpisodeChunk:
@@ -37,6 +43,8 @@ class EpisodeChunk:
     exec_dt: float
     timestamp: float
     note: str = ""
+    manual_ee_offset_xyz: np.ndarray | None = None
+    gripper_override: str = "none"
 
 
 class EpisodeReplayRecorder:
@@ -73,6 +81,7 @@ class EpisodeReplayRecorder:
         ep_dir = self.episode_root / self.current_id
         chunk_dir = ep_dir / "chunks"
         chunk_dir.mkdir(parents=True, exist_ok=True)
+
         final_reward = float(OUTCOME_REWARD[outcome])
         n = len(self.chunks)
         chunk_files = []
@@ -84,6 +93,15 @@ class EpisodeReplayRecorder:
             success = outcome == "success"
             failure = outcome in {"failure", "unsafe"}
             path = chunk_dir / f"chunk_{i:06d}.npz"
+
+            manual_ee = chunk.manual_ee_offset_xyz
+            if manual_ee is None:
+                manual_ee = np.zeros((3,), dtype=np.float32)
+            manual_ee = np.asarray(manual_ee, dtype=np.float32).reshape(3)
+
+            gripper_name = str(chunk.gripper_override or "none").lower()
+            gripper_id = int(GRIPPER_OVERRIDE_TO_ID.get(gripper_name, 0))
+
             np.savez_compressed(
                 path,
                 observation_image=np.asarray(chunk.obs["observation/image"], dtype=np.uint8),
@@ -92,6 +110,11 @@ class EpisodeReplayRecorder:
                 pi_actions=np.asarray(chunk.pi_actions, dtype=np.float32),
                 executed_actions=np.asarray(chunk.executed_actions, dtype=np.float32),
                 delta_actions=np.asarray(chunk.delta_actions, dtype=np.float32),
+
+                manual_ee_offset_xyz=manual_ee,
+                gripper_override=np.asarray(gripper_name, dtype=object),
+                gripper_override_id=np.int64(gripper_id),
+
                 reward=np.float32(reward),
                 discounted_return=np.float32(discounted_return),
                 episode_return=np.float32(final_reward),
@@ -130,8 +153,12 @@ class EpisodeReplayRecorder:
             "task_modes": [c.task_mode for c in self.chunks],
             "rlt_chunks": int(sum(1 for c in self.chunks if c.rlt_enabled)),
         }
-        (ep_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+        (ep_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         with self.index_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(metadata, ensure_ascii=False) + "\n")
+
         self.start_new_episode()
         return ep_dir

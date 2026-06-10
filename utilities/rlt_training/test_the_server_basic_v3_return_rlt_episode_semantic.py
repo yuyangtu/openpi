@@ -630,7 +630,7 @@ def apply_manual_ee_translation_offset(
         J_pos = J[:3, :7]
 
         # Damped least squares:
-        # dq = J^T (J J^T + 位I)^-1 dx
+        # dq = J^T (J J^T + λI)^-1 dx
         A = J_pos @ J_pos.T + damping * np.eye(3)
 
         try:

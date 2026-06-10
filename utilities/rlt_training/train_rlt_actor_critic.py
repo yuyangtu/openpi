@@ -18,8 +18,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--action-dim", type=int, default=8)
     parser.add_argument("--state-dim", type=int, default=8)
@@ -34,7 +34,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-weight", type=float, default=0.5)
     parser.add_argument("--actor-q-weight", type=float, default=0.0)
     parser.add_argument("--reference-dropout", type=float, default=0.15)
+    parser.add_argument("--image-encoder", choices=["small", "dinov2_s"], default="small")
+    parser.add_argument("--dinov2-model", default="dinov2_vits14")
+    parser.set_defaults(freeze_image_encoder=True)
+    parser.add_argument("--freeze-image-encoder", action="store_true", dest="freeze_image_encoder")
+    parser.add_argument("--no-freeze-image-encoder", action="store_false", dest="freeze_image_encoder")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--num-workers", type=int, default=2)
     return parser.parse_args()
 
 
@@ -101,8 +107,6 @@ def actor_step(model, batch, optimizer, ce, args):
 
     anchor_loss = pred["ee_offset"].pow(2).mean()
 
-    # Keep actor_q_weight at 0 initially. This avoids Q explosion and trains
-    # human semantic correction behavior cloning first.
     actor_loss = (
         args.ee_weight * ee_loss
         + args.gripper_weight * gripper_loss
@@ -200,8 +204,8 @@ def main() -> None:
     else:
         train_ds, val_ds = dataset, None
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(train_ds if val_ds is None else val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2) if val_ds is not None else None
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    val_loader = DataLoader(train_ds if val_ds is None else val_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers) if val_ds is not None else None
 
     model = RLTActorCritic(
         state_dim=args.state_dim,
@@ -209,9 +213,13 @@ def main() -> None:
         horizon=args.horizon,
         max_delta=args.max_delta,
         max_ee_offset=args.max_ee_offset,
+        image_encoder=args.image_encoder,
+        freeze_image_encoder=args.freeze_image_encoder,
+        dinov2_model=args.dinov2_model,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=1e-4)
     bce = nn.BCEWithLogitsLoss()
     ce = nn.CrossEntropyLoss(reduction="none")
 

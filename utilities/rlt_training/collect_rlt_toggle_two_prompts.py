@@ -46,6 +46,9 @@ from tams_diana7_tools.dual_diana_helper import DualDianaHelper
 from tams_diana7_tools.gripper_interfaces import GripperType
 
 
+# ============================================================
+# Joint names
+# ============================================================
 ARM_L_NAMES = [
     "arm_l_joint_1",
     "arm_l_joint_2",
@@ -78,37 +81,58 @@ class Args:
     port: int = 8000
     num_steps: int = 2000
 
+    # Two prompts, same pi0.5 policy server.
     prompt: str = "pick up the spoon and feed the person"
     return_prompt: str = "return the spoon to the start position"
+
+    # RLT replay output.
     replay_dir: str = "./rlt_replay_toggle_two_prompts"
 
+    # Optional trained RLT checkpoint. Empty means label-only or random exploration.
     rlt_checkpoint: str = ""
     rlt_device: str = "cuda"
     rlt_max_delta: float = 0.03
     rlt_risk_stop_threshold: float = 0.92
+
+    # Random residual exploration, only active when t/RLT is enabled and no checkpoint is given.
     explore_delta_std: float = 0.0
     explore_delta_max: float = 0.02
 
+    # Observation processing.
     rotate_wrist_180: bool = False
     convert_to_rgb: bool = True
     resize_hw: int = 224
 
+    # Policy action chunk.
+    # Matches your old two-prompt client by default: execute the full 12-action horizon.
     horizon: int = 12
     exec_steps: int = 12
     manual_d: int = 0
 
+    # MoveIt execution.
     waypoint_dt: float = 0.10
     vel_scale: float = 0.05
     acc_scale: float = 0.05
     planning_time: float = 0.5
+
+    # Safety behavior.
+    # Usually keep RLT disabled for RETURN unless you intentionally collect/train return residuals.
     allow_rlt_on_return: bool = False
 
+    # Logging/debug.
     label_every_chunk: bool = True
     print_action_debug: bool = True
     print_timing: bool = True
 
 
 class TwoPromptRolloutKeyboard:
+    """Blocking per-chunk keyboard labeler.
+
+    Kept separate from rlt_training.RolloutKeyboard because that class uses
+    `r` for RLT toggle and `c` for collision, which conflicts with your
+    two-prompt policy client.
+    """
+
     def __init__(self):
         self.rlt_enabled = False
         self.rlt_toggle_on = False
@@ -121,7 +145,7 @@ class TwoPromptRolloutKeyboard:
         self.reset_type = ""
         self.phase = "unknown"
         self.note = ""
-        self.task_cmd: Optional[str] = None
+        self.task_cmd: Optional[str] = None  # "FEED" or "RETURN"
 
     def poll_blocking(self, current_mode: str, current_rlt_allowed: bool) -> None:
         msg = (
@@ -137,12 +161,14 @@ class TwoPromptRolloutKeyboard:
             self.note = "eof_quit"
             return
 
+        # Reset command-only state for this polling step.
         self.task_cmd = None
 
         if raw == "":
             self.note = ""
             return
 
+        # Allow either "2 t" or "2t" style input for convenience.
         tokens = raw.split() if " " in raw else list(raw)
 
         for cmd in tokens:
@@ -190,6 +216,7 @@ class TwoPromptRolloutKeyboard:
                 rospy.logwarn(f"Unknown keyboard command ignored: {cmd}")
 
     def make_label(self, exec_ok: bool, collision_from_checker: bool, current_mode: str, rlt_allowed: bool) -> ChunkLabel:
+        # If RLT is not allowed in the current mode, store rlt_enabled=False in the replay label.
         effective_rlt = bool(self.rlt_enabled and rlt_allowed)
         label = ChunkLabel(
             success=self.success,
@@ -205,6 +232,7 @@ class TwoPromptRolloutKeyboard:
             phase=self.phase,
             note=f"mode={current_mode};{self.note}" if self.note else f"mode={current_mode}",
         )
+        # Per-chunk labels reset; persistent mode/RLT/phase remain.
         self.success = False
         self.failure = False
         self.collision = False
@@ -237,24 +265,31 @@ class SensorCache:
         name_to_idx = {n: i for i, n in enumerate(msg.name) if i < len(msg.position)}
         state = self._right_state_8.copy()
         got_right = self._got_right_arm
+
+        # Prefer explicit right-arm joint names.
         if all(n in name_to_idx for n in ARM_R_NAMES):
             state[:7] = np.array([msg.position[name_to_idx[n]] for n in ARM_R_NAMES], dtype=np.float32)
             got_right = True
-        elif len(msg.position) >= 14:
-            arm_r_names = [n for n in msg.name if "arm_r" in n]
-            if len(arm_r_names) >= 7:
-                try:
-                    state[:7] = np.array([msg.position[name_to_idx[n]] for n in arm_r_names[:7]], dtype=np.float32)
+        else:
+            # Fallback only when /joint_states is complete enough; avoid gripper-only pollution.
+            if len(msg.position) >= 14:
+                arm_r_names = [n for n in msg.name if "arm_r" in n]
+                if len(arm_r_names) >= 7:
+                    try:
+                        state[:7] = np.array([msg.position[name_to_idx[n]] for n in arm_r_names[:7]], dtype=np.float32)
+                        got_right = True
+                    except Exception:
+                        pass
+                else:
+                    state[:7] = np.array(msg.position[7:14], dtype=np.float32)
                     got_right = True
-                except Exception:
-                    pass
-            else:
-                state[:7] = np.array(msg.position[7:14], dtype=np.float32)
-                got_right = True
+
+        # Gripper may arrive independently.
         for gn in GRIPPER_R_CANDIDATES:
             if gn in name_to_idx:
                 state[7] = np.float32(msg.position[name_to_idx[gn]])
                 break
+
         with self._lock:
             self._right_state_8 = state
             self._got_right_arm = got_right
@@ -271,14 +306,18 @@ class SensorCache:
 
     def _process_image(self, img, do_rotate_180: bool):
         import cv2
+
         if img is None:
             img = np.zeros((self.resize_hw, self.resize_hw, 3), dtype=np.uint8)
         elif img.shape[0] != self.resize_hw or img.shape[1] != self.resize_hw:
             img = cv2.resize(img, (self.resize_hw, self.resize_hw))
+
         if do_rotate_180:
             img = cv2.flip(img, -1)
+
         if self.convert_to_rgb:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
         return img
 
     def wait_ready(self, timeout: float = 3.0) -> bool:
@@ -330,13 +369,16 @@ def _robot_state_from_joints(joint_names, joint_positions):
 def _make_target14_by_name(joint_names: List[str], left_fixed_7: np.ndarray, right_target_7: np.ndarray) -> List[float]:
     left_fixed_7 = np.asarray(left_fixed_7, dtype=np.float64).reshape(7)
     right_target_7 = np.asarray(right_target_7, dtype=np.float64).reshape(7)
+
     value_map: Dict[str, float] = {}
     for name, val in zip(ARM_L_NAMES, left_fixed_7):
         value_map[name] = float(val)
     for name, val in zip(ARM_R_NAMES, right_target_7):
         value_map[name] = float(val)
+
     if all(jn in value_map for jn in joint_names):
         return [value_map[jn] for jn in joint_names]
+
     rospy.logwarn_throttle(
         1.0,
         "MoveIt joint names do not fully match ARM_L_NAMES/ARM_R_NAMES. "
@@ -351,6 +393,7 @@ def _concat_trajs(trajs, joint_names):
     full.joint_trajectory.joint_names = list(joint_names)
     t_offset = 0.0
     last_pos = None
+
     for seg_idx, tr in enumerate(trajs):
         pts = tr.joint_trajectory.points
         if not pts:
@@ -400,23 +443,29 @@ def plan_and_execute_horizon_with_arms_group(
     if not hasattr(robot, "arms_group") or robot.arms_group is None:
         rospy.logerr("robot.arms_group is None. Need DualDianaHelper(load_moveit=True) and both arms active.")
         return False
+
     group = robot.arms_group
     group.set_planning_time(float(planning_time))
     group.set_max_velocity_scaling_factor(float(vel_scale))
     group.set_max_acceleration_scaling_factor(float(acc_scale))
+
     joint_names = _get_arms_joint_names(group)
     if len(joint_names) != 14:
         rospy.logwarn(f"arms joint_names length is {len(joint_names)}: {joint_names}")
+
     seg_trajs = []
     cur_start_14 = None
+
     for k in range(right_waypoints_7.shape[0]):
         target14 = _make_target14_by_name(joint_names, left_fixed_7, right_waypoints_7[k])
         if cur_start_14 is not None:
             group.set_start_state(_robot_state_from_joints(joint_names, cur_start_14))
         else:
             group.set_start_state_to_current_state()
+
         group.set_joint_value_target({jn: float(p) for jn, p in zip(joint_names, target14)})
         plan_ret = group.plan()
+
         if isinstance(plan_ret, tuple):
             success, plan_msg, _, _ = plan_ret
             if (not success) or plan_msg is None or len(plan_msg.joint_trajectory.points) == 0:
@@ -429,11 +478,14 @@ def plan_and_execute_horizon_with_arms_group(
                 rospy.logwarn(f"MoveIt plan failed at waypoint {k}")
                 return False
             seg_trajs.append(plan_msg)
+
         cur_start_14 = np.array(seg_trajs[-1].joint_trajectory.points[-1].positions, dtype=np.float64)
+
     full = _concat_trajs(seg_trajs, joint_names)
     if len(full.joint_trajectory.points) == 0:
         rospy.logwarn("Concatenated trajectory is empty.")
         return False
+
     full = _retime_uniform_dt(full, dt=float(waypoint_dt))
     try:
         full = group.retime_trajectory(
@@ -445,6 +497,7 @@ def plan_and_execute_horizon_with_arms_group(
         )
     except Exception as e:
         rospy.logwarn(f"retime_trajectory failed, executing uniform-dt trajectory: {e}")
+
     ok = group.execute(full, wait=True)
     group.stop()
     group.clear_pose_targets()
@@ -469,11 +522,13 @@ def crop_action_segment(actions: np.ndarray, horizon: int, manual_d: int, exec_s
 def apply_rlt_or_exploration(obs, pi_seg, keyboard: TwoPromptRolloutKeyboard, adapter, args: Args, current_mode: str):
     delta = np.zeros_like(pi_seg, dtype=np.float64)
     info = {"risk": 0.0, "value": 0.0, "source": "none", "stopped_by_risk": False}
+
     rlt_allowed = (current_mode == "FEED") or bool(args.allow_rlt_on_return)
     if not keyboard.rlt_enabled or not rlt_allowed:
         if keyboard.rlt_enabled and not rlt_allowed:
             info["source"] = "blocked_in_return"
         return pi_seg.copy(), delta, info, rlt_allowed
+
     if adapter is not None:
         corrected, rlt_info = adapter.correct_observation_chunk(obs, pi_seg)
         delta = np.asarray(corrected, dtype=np.float64) - np.asarray(pi_seg, dtype=np.float64)
@@ -482,20 +537,24 @@ def apply_rlt_or_exploration(obs, pi_seg, keyboard: TwoPromptRolloutKeyboard, ad
         if rlt_info.get("stopped_by_risk", False):
             return pi_seg.copy(), np.zeros_like(pi_seg, dtype=np.float64), info, rlt_allowed
         return corrected, delta, info, rlt_allowed
+
     if args.explore_delta_std > 0:
         delta = np.random.normal(0.0, args.explore_delta_std, size=pi_seg.shape)
-        delta[:, 7] = 0.0
+        delta[:, 7] = 0.0  # keep gripper controlled by pi0.5
         delta = np.clip(delta, -args.explore_delta_max, args.explore_delta_max)
         info["source"] = "random_explore"
         return (pi_seg + delta).astype(np.float64), delta.astype(np.float64), info, rlt_allowed
+
     info["source"] = "label_only"
     return pi_seg.copy(), delta, info, rlt_allowed
 
 
 def main(args: Args) -> None:
     rospy.init_node("openpi_rlt_two_prompt_collector", anonymous=True)
+
     policy = _websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
     logging.info(f"Server metadata: {policy.get_server_metadata()}")
+
     adapter = None
     if args.rlt_checkpoint:
         adapter = RLTActionRuntime(
@@ -505,6 +564,7 @@ def main(args: Args) -> None:
             risk_stop_threshold=args.rlt_risk_stop_threshold,
         )
         rospy.loginfo(f"Loaded RLT checkpoint: {args.rlt_checkpoint}")
+
     robot = DualDianaHelper(
         load_moveit=True,
         arm_l_active=True,
@@ -516,27 +576,34 @@ def main(args: Args) -> None:
         load_joint_trajectory_controller=True,
     )
     robot.load_position_trajectory_controllers()
+
+    # Same initial pose as your two-prompt client.
     joint_goal_r = np.deg2rad([-32, 5, -18, 95, -8, -85, -1])
     joint_goal_l = np.deg2rad([-32, -23, -49, 97, 11, -98, -1])
     joint_goal_gripper_l = np.array([0.0], dtype=np.float32)
-    joint_goal_gripper_r = np.array([1.0], dtype=np.float32)
+    joint_goal_gripper_r = np.array([1.0], dtype=np.float32)  # open
     joint_goal = np.concatenate([joint_goal_l, joint_goal_r, joint_goal_gripper_l, joint_goal_gripper_r])
     robot.move_to_joint_goal(joint_goal, use_moveit=True)
     left_fixed = np.array(joint_goal_l, dtype=np.float64)
+
     joint_names = _get_arms_joint_names(robot.arms_group)
     rospy.loginfo("MoveIt arm joint order:")
     for i, jn in enumerate(joint_names):
         rospy.loginfo(f"  [{i}] {jn}")
+
     sensor = SensorCache(args.rotate_wrist_180, args.convert_to_rgb, args.resize_hw)
     if not sensor.wait_ready(timeout=3.0):
         rospy.logwarn("Sensors not fully ready. Collector will continue, but replay may contain zero images/state until topics arrive.")
+
     replay = RolloutReplayBuffer(args.replay_dir)
     keyboard = TwoPromptRolloutKeyboard()
+
     current_mode = "FEED"
     current_prompt = args.prompt
     episode_id = f"ep_{current_mode}_{int(time.time())}"
     chunk_id = 0
     count = 0
+
     rospy.loginfo(
         "=== RUNNING TWO-PROMPT RLT COLLECTOR ===\n"
         f"H={args.horizon}, exec_steps={args.exec_steps}, manual_d={args.manual_d}, dt={args.waypoint_dt}\n"
@@ -548,17 +615,23 @@ def main(args: Args) -> None:
         "  t : toggle RLT residual/exploration on/off\n"
         "  x : mark collision/unsafe behavior\n"
     )
+
+    # Warm up both prompts once, so prompt switching is less likely to trigger first-call latency.
     rospy.loginfo("Warming up policy inference for FEED prompt...")
     policy.infer(sensor.get_observation(args.prompt))
     rospy.loginfo("Warming up policy inference for RETURN prompt...")
     policy.infer(sensor.get_observation(args.return_prompt))
+
     start_time = time.time()
+
     while not rospy.is_shutdown() and count < int(args.num_steps):
         rlt_allowed_for_mode = (current_mode == "FEED") or bool(args.allow_rlt_on_return)
+
         if args.label_every_chunk:
             keyboard.poll_blocking(current_mode=current_mode, current_rlt_allowed=rlt_allowed_for_mode)
             if keyboard.stop:
                 break
+
             if keyboard.task_cmd == "RETURN":
                 current_mode = "RETURN"
                 current_prompt = args.return_prompt
@@ -567,31 +640,39 @@ def main(args: Args) -> None:
                     rospy.logwarn("[MODE] Switched to RETURN and disabled RLT because allow_rlt_on_return=False.")
                 else:
                     rospy.logwarn(f"[MODE] Switched to RETURN. prompt='{current_prompt}'")
+
             elif keyboard.task_cmd == "FEED":
                 current_mode = "FEED"
                 current_prompt = args.prompt
                 rospy.logwarn(f"[MODE] Switched to FEED. prompt='{current_prompt}'")
+
             if keyboard.human_env_reset:
                 episode_id = f"ep_{current_mode}_{int(time.time())}"
                 chunk_id = 0
                 rospy.loginfo("Human environment reset marked. Starting a fresh post-reset segment.")
+
         obs = sensor.get_observation(current_prompt)
+
         if args.print_action_debug:
             rospy.loginfo(
                 f"[OBS] mode={current_mode}, prompt='{current_prompt}', "
                 f"state={_fmt_arr(obs['observation/state'])}"
             )
+
         t_infer0 = time.time()
         result = policy.infer(obs)
         t_infer1 = time.time()
+
         if not isinstance(result, dict) or "actions" not in result:
             rospy.logwarn(f"Policy output has no 'actions': type={type(result)}")
             continue
+
         try:
             pi_seg = crop_action_segment(result["actions"], args.horizon, args.manual_d, args.exec_steps)
         except ValueError as e:
             rospy.logwarn(str(e))
             continue
+
         exec_seg, delta_seg, rlt_info, rlt_allowed_for_mode = apply_rlt_or_exploration(
             obs=obs,
             pi_seg=pi_seg,
@@ -600,18 +681,21 @@ def main(args: Args) -> None:
             args=args,
             current_mode=current_mode,
         )
+
         if args.print_action_debug:
             rospy.loginfo(
                 f"[ACTION] mode={current_mode}, src={rlt_info['source']}, "
                 f"first={_fmt_arr(exec_seg[0])}, last={_fmt_arr(exec_seg[-1])}, "
                 f"infer_dt={t_infer1 - t_infer0:.3f}s, delta_max={float(np.max(np.abs(delta_seg))):.4f}"
             )
+
         if rlt_info.get("stopped_by_risk", False):
             rospy.logwarn(f"RLT risk gate held chunk: risk={rlt_info['risk']:.3f}")
             label = keyboard.make_label(exec_ok=False, collision_from_checker=False, current_mode=current_mode, rlt_allowed=rlt_allowed_for_mode)
             replay.add_chunk(obs, pi_seg, pi_seg, label, episode_id, chunk_id, delta_actions=np.zeros_like(pi_seg))
             chunk_id += 1
             continue
+
         right_waypoints = exec_seg[:, :7].copy()
         t_exec0 = time.time()
         exec_ok = plan_and_execute_horizon_with_arms_group(
@@ -624,6 +708,7 @@ def main(args: Args) -> None:
             acc_scale=args.acc_scale,
         )
         t_exec1 = time.time()
+
         if exec_ok:
             rg = float(exec_seg[-1, 7])
             if robot.gripper_r is not None:
@@ -633,6 +718,7 @@ def main(args: Args) -> None:
                     robot.gripper_r.close()
         else:
             rospy.logwarn("Chunk planning/execution failed. Saving negative/failed replay label if marked by keyboard/exec_ok.")
+
         label = keyboard.make_label(exec_ok=exec_ok, collision_from_checker=False, current_mode=current_mode, rlt_allowed=rlt_allowed_for_mode)
         replay.add_chunk(
             obs=obs,
@@ -644,9 +730,11 @@ def main(args: Args) -> None:
             chunk_id=chunk_id,
         )
         chunk_id += 1
+
         seg_steps = int(exec_seg.shape[0])
         if exec_ok:
             count += seg_steps
+
         if args.print_timing:
             rospy.loginfo(
                 f"saved chunk={chunk_id} mode={current_mode} steps={seg_steps} total_steps={count}/{args.num_steps} "
@@ -657,6 +745,7 @@ def main(args: Args) -> None:
                 f"success={label.success} failure={label.failure} collision={label.collision} "
                 f"env_reset={label.human_env_reset} phase={label.phase}"
             )
+
     end_time = time.time()
     rospy.loginfo(
         f"Finished. executed_steps={count}, total_time={end_time - start_time:.2f}s, "

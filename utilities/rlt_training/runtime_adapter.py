@@ -19,13 +19,9 @@ def _image_to_tensor(image: np.ndarray, image_size: int) -> torch.Tensor:
 class RLTActionRuntime:
     """Runtime wrapper.
 
-    Supports two checkpoint kinds:
-      - rlt_actor_critic_semantic: predicts ee_offset + gripper class.
-      - rlt_actor_critic / legacy adapter: returns corrected joint chunk.
-
-    For semantic checkpoints, correct_observation_chunk() deliberately returns
-    pi_actions unchanged and exposes semantic correction in info. The robot
-    script should convert info["ee_offset"] to joint residual via Jacobian.
+    Supports semantic checkpoints with small CNN or DINOv2-S image encoders.
+    For semantic checkpoints, correct_observation_chunk() returns pi_actions
+    unchanged and exposes semantic correction in info.
     """
 
     def __init__(
@@ -54,6 +50,9 @@ class RLTActionRuntime:
                 horizon=self.horizon,
                 max_delta=float(args.get("max_delta", max_delta)),
                 max_ee_offset=float(args.get("max_ee_offset", max_delta)),
+                image_encoder=str(args.get("image_encoder", "small")),
+                freeze_image_encoder=bool(args.get("freeze_image_encoder", True)),
+                dinov2_model=str(args.get("dinov2_model", "dinov2_vits14")),
             ).to(self.device)
         else:
             self.model = RLTActionAdapter(
@@ -81,13 +80,23 @@ class RLTActionRuntime:
 
         pred = self.model(top, wrist, state, pi)
 
-        logit_key = "risk_logit" if "risk_logit" in pred else "gate_logit"
-        risk = float(torch.sigmoid(pred[logit_key])[0].detach().cpu())
-        value = float(pred["q1"][0].detach().cpu()) if "q1" in pred else 0.0
+        gate_prob = -1.0
+        if "gate_logit" in pred:
+            gate_prob = float(torch.sigmoid(pred["gate_logit"])[0].detach().cpu())
 
+        # For semantic checkpoints, gate_logit means "should enable correction",
+        # not physical risk. Do not use it as risk-stop signal.
+        if self.kind == "rlt_actor_critic_semantic":
+            risk = 0.0
+        else:
+            logit_key = "risk_logit" if "risk_logit" in pred else "gate_logit"
+            risk = float(torch.sigmoid(pred[logit_key])[0].detach().cpu())
+
+        value = float(pred["q1"][0].detach().cpu()) if "q1" in pred else 0.0
         info = {
             "value": value,
             "risk": risk,
+            "gate_prob": gate_prob,
             "stopped_by_risk": False,
             "kind": self.kind,
         }
@@ -112,7 +121,6 @@ class RLTActionRuntime:
             )
             return pi_actions.astype(np.float64), info
 
-        # Legacy joint residual checkpoints.
         delta = pred["delta_actions"][0].detach().cpu().numpy()
         delta = np.clip(delta, -self.max_delta, self.max_delta)
         corrected = padded + delta
